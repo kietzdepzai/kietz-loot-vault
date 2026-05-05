@@ -69,7 +69,7 @@ const Header = () => {
         <div className="container mx-auto px-4 py-1.5 flex items-center justify-between">
           <div className="flex items-center gap-4 text-xs text-muted-foreground">
             <a href="https://discord.gg/shopkietz" target="_blank" rel="noopener" className="flex items-center gap-1 hover:text-primary transition-colors">
-              <Phone className="w-3 h-3" /> Discord: dsc.gg/shopkietz
+              <Phone className="w-3 h-3" /> Discord: dsc.gg/f6hv3j
             </a>
             <span className="hidden sm:flex items-center gap-1">
               <Mail className="w-3 h-3" /> support@shopkietz.com
