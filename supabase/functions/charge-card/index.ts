@@ -1,18 +1,17 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { crypto } from "https://deno.land/std@0.168.0/crypto/mod.ts";
-import { encode as hexEncode } from "https://deno.land/std@0.168.0/encoding/hex.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
 async function md5(message: string): Promise<string> {
   const msgUint8 = new TextEncoder().encode(message);
   const hashBuffer = await crypto.subtle.digest("MD5", msgUint8);
-  return new TextDecoder().decode(hexEncode(new Uint8Array(hashBuffer)));
+  return Array.from(new Uint8Array(hashBuffer))
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('');
 }
 
 serve(async (req) => {
@@ -21,6 +20,15 @@ serve(async (req) => {
   }
 
   try {
+    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+    const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+    
+    // Thesieure Credentials
+    const TSR_PARTNER_ID = "13610068333";
+    const TSR_PARTNER_KEY = Deno.env.get("TSR_PARTNER_KEY");
+
+    const supabase = createClient(supabaseUrl, supabaseServiceKey);
+
     const { telco, code, serial, amount, user_id, topup_request_id } = await req.json();
 
     // Validate inputs
@@ -31,68 +39,76 @@ serve(async (req) => {
       );
     }
 
-    const GTF_PARTNER_ID = Deno.env.get("GTF_PARTNER_ID");
-    const GTF_PARTNER_KEY = Deno.env.get("GTF_PARTNER_KEY");
-
-    if (!GTF_PARTNER_ID || !GTF_PARTNER_KEY) {
+    if (!TSR_PARTNER_KEY) {
       return new Response(
-        JSON.stringify({ error: "API credentials not configured" }),
+        JSON.stringify({ error: "TSR_PARTNER_KEY chưa được cấu hình" }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    // Generate unique request_id
-    const request_id = `${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
-    const command = "charging";
+    const request_id = `TSR${Date.now()}${Math.floor(Math.random() * 100000)}`;
 
-    // Build sign: md5(partner_key + code + command + partner_id + request_id + serial + telco)
-    // telco is UPPERCASE, rest is lowercase
-    const telcoUpper = telco.toUpperCase();
-    const signString = GTF_PARTNER_KEY + code + command + GTF_PARTNER_ID + request_id + serial + telcoUpper;
-    const sign = await md5(signString);
+    // Tạo chữ ký cho Thesieure
+    const sign = await md5(TSR_PARTNER_KEY + code + serial);
 
-    // Send to gachthefast.com API
-    const formData = new URLSearchParams();
-    formData.append("telco", telcoUpper);
-    formData.append("code", code);
-    formData.append("serial", serial);
-    formData.append("amount", amount.toString());
-    formData.append("request_id", request_id);
-    formData.append("partner_id", GTF_PARTNER_ID);
-    formData.append("command", command);
-    formData.append("sign", sign);
+    const payload = {
+      partner_id: TSR_PARTNER_ID,
+      telco: telco.toLowerCase(),
+      code: code.trim(),
+      serial: serial.trim(),
+      face_value: parseInt(amount),
+      request_id: request_id,
+      sign: sign,
+    };
 
-    console.log("Sending card to gachthefast.com:", { telco: telcoUpper, amount, request_id });
-
-    const apiResponse = await fetch("https://gachthefast.com/chargingws/v2", {
+    // Gửi thẻ lên Thesieure
+    const response = await fetch("https://thesieure.com/api/card", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: formData.toString(),
+      body: new URLSearchParams(payload as any),
     });
 
-    const result = await apiResponse.json();
-    console.log("gachthefast.com response:", result);
+    const result = await response.json();
 
-    // Update topup_request with request_id
-    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-    const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const supabase = createClient(supabaseUrl, supabaseServiceKey);
+    console.log("Thesieure Response:", result);
 
+    // Lưu hoặc cập nhật topup_request
     if (topup_request_id) {
       await supabase
         .from("topup_requests")
-        .update({ request_id, card_result: JSON.stringify(result) })
+        .update({ 
+          request_id,
+          status: "pending",
+          note: "Đã gửi lên Thesieure"
+        })
         .eq("id", topup_request_id);
+    } else {
+      await supabase.from("topup_requests").insert({
+        user_id,
+        request_id,
+        telco: telco.toLowerCase(),
+        code: code.trim(),
+        serial: serial.trim(),
+        declared_value: parseInt(amount),
+        status: "pending",
+        note: "Đã gửi lên Thesieure",
+      });
     }
 
     return new Response(
-      JSON.stringify({ success: true, request_id, api_result: result }),
+      JSON.stringify({
+        success: true,
+        message: "Đã gửi thẻ thành công",
+        request_id: request_id,
+        tsr_response: result
+      }),
       { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
+
   } catch (error) {
-    console.error("charge-card error:", error);
+    console.error("Charge card error:", error);
     return new Response(
-      JSON.stringify({ error: error instanceof Error ? error.message : "Unknown error" }),
+      JSON.stringify({ error: "Internal server error", details: error.message }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
